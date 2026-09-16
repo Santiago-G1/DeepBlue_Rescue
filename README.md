@@ -13,6 +13,7 @@ experiencia y tratamientos, utilizando Java 21, Spring Boot 4, Spring Data JPA,
 Hibernate, Flyway, PostgreSQL y Testcontainers.
 
 
+
 ## 3. Modelo de datos
 
 | Tabla | Descripcion |

@@ -12,8 +12,6 @@ casos de rescate, animales, expedientes medicos, especialistas, areas de
 experiencia y tratamientos, utilizando Java 21, Spring Boot 4, Spring Data JPA,
 Hibernate, Flyway, PostgreSQL y Testcontainers.
 
-No incluye controllers, servicios, DTOs ni frontend: esta dedicado
-exclusivamente a persistencia.
 
 ## 3. Modelo de datos
 

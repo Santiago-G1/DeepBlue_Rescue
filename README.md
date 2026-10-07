@@ -40,12 +40,27 @@ Specialist    1:N Treatment
 
 ## 5. Instrucciones para ejecutar
 
-Requisitos: Java 21, Maven y (opcionalmente) Docker para los tests.
+Requisitos: Java 21, Maven y Docker.
 
 ```bash
 cd deepblue-rescue
 ./mvnw clean compile
 ```
+
+Levanta la base de datos PostgreSQL en un contenedor (ver seccion 11):
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+Luego ejecuta la aplicacion:
+
+```bash
+./mvnw spring-boot:run
+```
+
+La API queda disponible en `http://localhost:8080` (ver seccion 12).
 
 La aplicacion espera una base PostgreSQL. Las credenciales se configuran con
 variables de entorno opcionales:
@@ -143,3 +158,128 @@ Las pruebas de integracion comprueban restricciones `UNIQUE` (centros y
 dispositivos GPS), la clave foranea de los casos de rescate y el `CHECK` de
 estados validos. Tambien se prueba el escenario integrador de una tortuga
 marina, su expediente, especialista, expertise y tratamientos.
+
+## 11. Base de datos con Docker Compose
+
+El archivo `docker-compose.yml` define un servicio `postgres` con la imagen
+`postgres:18-alpine` usando las mismas credenciales que `application.yml`:
+
+| Parametro | Valor |
+|---|---|
+| Imagen | `postgres:18-alpine` |
+| Contenedor | `deepblue-db` |
+| Base | `deepblue` |
+| Usuario | `postgres` |
+| Password | `postgres` |
+| Puerto | `5432:5432` |
+| Volumen | `deepblue-data` (los datos sobreviven a `docker compose down`) |
+| Healthcheck | `pg_isready` cada 5 segundos |
+
+Comandos habituales:
+
+```bash
+docker compose up -d        # levanta la base de datos
+docker compose ps           # estado del contenedor
+docker compose logs -f      # logs de PostgreSQL
+docker compose down         # detiene el contenedor (conserva el volumen)
+docker compose down -v      # detiene y borra el volumen con los datos
+```
+
+La aplicacion se conecta con `DB_URL`, `DB_USER` y `DB_PASSWORD`, por lo que
+con las variables por defecto no hay que configurar nada adicional. Los tests
+no usan este servicio: `PersistenceIntegrationTest` levanta su propio
+contenedor desechable con Testcontainers, de modo que `./mvnw clean test` y
+`docker compose up -d` pueden convivir sin interferirse.
+
+## 12. API REST (capa de controladores)
+
+La capa HTTP esta en `com.deepblue.rescue.controller` y expone los 8 metodos
+de la capa Service. Los controllers no contienen logica de negocio: solo
+traducen HTTP a llamadas de Service y devuelven DTOs.
+
+### Endpoints
+
+| Metodo | Endpoint | Operacion | Service |
+|---|---|---|---|
+| GET | `/api/rescue-cases/{caseCode}` | Consultar caso | `RescueCaseService.findByCode()` |
+| GET | `/api/rescue-cases?status=...` | Casos por estado | `RescueCaseService.findByStatus()` |
+| PATCH | `/api/rescue-cases/{caseCode}/status` | Cambiar estado | `RescueCaseService.changeStatus()` |
+| GET | `/api/animals/{animalCode}` | Consultar animal | `AnimalService.findByCode()` |
+| GET | `/api/animals/in-rehabilitation` | Animales en rehabilitacion | `AnimalService.findAnimalsInRehabilitation()` |
+| GET | `/api/animals/{animalCode}/treatments` | Tratamientos del animal | `TreatmentService.findByAnimalCode()` |
+| GET | `/api/animals/{animalCode}/treatment-eligibility` | Elegibilidad de tratamiento | `AnimalService.canReceiveTreatment()` |
+| POST | `/api/treatments` | Registrar tratamiento | `TreatmentService.register()` |
+
+### Codigos de respuesta
+
+| Codigo | Uso |
+|---|---|
+| 200 | Consulta o actualizacion correcta |
+| 201 | Tratamiento creado (`POST /api/treatments`) |
+| 400 | Request invalido: Bean Validation, JSON malformado o query param invalido |
+| 404 | Recurso inexistente (`ResourceNotFoundException`) |
+| 409 | Regla de negocio violada (`BusinessRuleException`) |
+| 500 | Error inesperado (sin exponer stack trace ni detalles internos) |
+
+### Contrato de errores
+
+Todos los errores devuelven la misma estructura `ErrorResponse`, manejada por
+`GlobalExceptionHandler` (`@RestControllerAdvice`):
+
+```json
+{
+    "timestamp": "2026-10-06T19:01:00",
+    "status": 404,
+    "error": "Not Found",
+    "message": "Animal not found: AN-999",
+    "details": {}
+}
+```
+
+Cuando la validacion de entrada falla, `details` indica campo por campo:
+
+```json
+{
+    "timestamp": "2026-10-06T19:01:00",
+    "status": 400,
+    "error": "Bad Request",
+    "message": "Request validation failed",
+    "details": {
+        "animalCode": "Animal code is required",
+        "description": "Description is required"
+    }
+}
+```
+
+### Ejemplo de uso
+
+```bash
+curl http://localhost:8080/api/rescue-cases/RES-2026-100
+curl http://localhost:8080/api/animals/AN-2026-100/treatment-eligibility
+curl -X POST http://localhost:8080/api/treatments \
+  -H 'Content-Type: application/json' \
+  -d '{"animalCode":"AN-2026-100","specialistCode":"SPEC-001","performedAt":"2026-08-21T09:00:00","type":"WOUND_CARE","description":"Cleaning of left front flipper injury."}'
+curl -X PATCH http://localhost:8080/api/rescue-cases/RES-2026-100/status \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"READY_FOR_RELEASE"}'
+```
+
+### Validacion de entrada y reglas de negocio
+
+- **Validacion de entrada** (Bean Validation en los DTOs, respondida con 400):
+  `animalCode` o `specialistCode` vacios, `status` nulo, `description` fuera del
+  rango 10-500 caracteres, fecha de tratamiento futura, JSON o enum invalidos.
+- **Reglas de negocio** (Service, respondidas con 409) o **recursos
+  inexistentes** (Service, respondidas con 404): animal o especialista
+  inexistente, especialista inactivo, caso `RELEASED`/`CLOSED`, transicion de
+  estado invalida o tratamiento anterior al rescate.
+
+### Tests de controller
+
+Los contratos HTTP se prueban con `@WebMvcTest` + `@MockitoBean` + MockMvc en
+`src/test/java/com/deepblue/rescue/controller`, sin PostgreSQL ni Repository
+real: `RescueCaseControllerTest`, `TreatmentControllerTest` y
+`AnimalControllerTest` cubren los 18 casos minimos (200, 201, 400 por
+validacion/JSON/query param, 404, 409, 500), verifican la delegacion al Service
+con `verify(...)` y que la validacion no llega al Service con
+`verify(..., never())`.
